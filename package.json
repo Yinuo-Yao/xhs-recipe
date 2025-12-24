@@ -1,0 +1,23 @@
+{
+  "name": "xhs-recipe-bot",
+  "version": "1.0.0",
+  "description": "Win11 XHS Recipe Extractor (Electron MVP)",
+  "main": "src/main/main.js",
+  "scripts": {
+    "dev": "electron .",
+    "start": "electron ."
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.25.1",
+    "dotenv": "^17.2.3",
+    "openai": "^6.15.0",
+    "zod": "^4.2.1"
+  },
+  "devDependencies": {
+    "electron": "^39.2.7"
+  }
+}

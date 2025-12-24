@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; img-src 'self' data: https: http: blob:; style-src 'self' 'unsafe-inline'; script-src 'self'"
+    />
+    <title>XHS Recipe Extractor</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="app">
+      <header class="topbar">
+        <div class="field">
+          <label for="urlInput">XHS Share URL</label>
+          <input id="urlInput" type="text" placeholder="Paste Xiaohongshu share URL…" />
+        </div>
+        <button id="fetchBtn" class="primary">Fetch</button>
+        <button id="settingsBtn" class="ghost">Settings</button>
+      </header>
+
+      <div class="statusline" id="statusLine">Idle</div>
+
+      <main class="main">
+        <section class="pane left">
+          <div class="paneHeader">
+            <h2>Caption</h2>
+          </div>
+          <textarea id="captionBox" class="caption" placeholder="Fetched caption will appear here… (you can edit before generating)"></textarea>
+
+          <div class="paneHeader">
+            <h2>Images</h2>
+            <div class="imgHeaderRight">
+              <div class="hint">Click to set first · × to remove</div>
+              <div class="imgHeaderActions">
+                <button id="refreshImagesBtn" class="ghost small" type="button">Download</button>
+                <button id="resetEditsBtn" class="ghost small" type="button">Reset</button>
+              </div>
+            </div>
+          </div>
+          <div id="imagesGrid" class="imagesGrid"></div>
+        </section>
+
+        <section class="pane right">
+          <div class="paneHeader">
+            <h2>Recipe (Markdown)</h2>
+            <div class="actions">
+              <button id="generateBtn" class="primary">Generate</button>
+              <button id="copyBtn" class="ghost">Copy</button>
+              <button id="exportBtn" class="ghost">Export .md</button>
+            </div>
+          </div>
+          <textarea id="outputBox" class="output" spellcheck="false" placeholder="Generated Markdown appears here…"></textarea>
+
+          <details class="logs" id="logsPanel">
+            <summary>Logs</summary>
+            <div class="logActions">
+              <button id="refreshLogsBtn" class="ghost small" type="button">Refresh</button>
+              <button id="openLogsFolderBtn" class="ghost small" type="button">Open logs folder</button>
+            </div>
+            <pre id="logsBox" class="logsBox"></pre>
+          </details>
+        </section>
+      </main>
+    </div>
+
+    <dialog id="settingsDialog" class="modal">
+      <form method="dialog" class="modalBody">
+        <h2>Settings</h2>
+        <div class="grid">
+          <div class="field">
+            <label>OpenAI API Key</label>
+            <div class="hint">
+              Set <code>OPENAI_API_KEY</code> in <code>.env</code> (this app no longer stores keys in Settings).
+            </div>
+          </div>
+
+          <div class="field">
+            <label for="modelInput">OpenAI Model</label>
+            <input id="modelInput" type="text" placeholder="gpt-4o-mini" />
+          </div>
+
+          <div class="field">
+            <label for="mcpTransportInput">MCP Transport</label>
+            <select id="mcpTransportInput">
+              <option value="http">HTTP (xiaohongshu-mcp default)</option>
+              <option value="stdio">Stdio (custom MCP)</option>
+            </select>
+            <div class="hint">For xpzouying/xiaohongshu-mcp use HTTP + http://localhost:18060/mcp</div>
+          </div>
+
+          <div class="field">
+            <label for="mcpHttpUrlInput">MCP HTTP URL</label>
+            <input id="mcpHttpUrlInput" type="text" placeholder="http://localhost:18060/mcp" />
+          </div>
+
+          <div class="field">
+            <label for="mcpCommandInput">MCP Command</label>
+            <input id="mcpCommandInput" type="text" placeholder="e.g. npx" />
+          </div>
+
+          <div class="field">
+            <label for="mcpArgsInput">MCP Args</label>
+            <input id="mcpArgsInput" type="text" placeholder='e.g. -y your-mcp-package' />
+          </div>
+
+          <div class="field">
+            <label for="mcpToolInput">MCP Tool Name (optional)</label>
+            <input id="mcpToolInput" type="text" placeholder="leave blank to auto-detect" />
+          </div>
+        </div>
+
+        <div class="modalActions">
+          <button value="cancel" class="ghost">Cancel</button>
+          <button id="saveSettingsBtn" value="default" class="primary">Save</button>
+        </div>
+      </form>
+    </dialog>
+
+    <script type="module" src="./renderer.js"></script>
+  </body>
+</html>
