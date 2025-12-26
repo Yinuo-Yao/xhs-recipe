@@ -16,6 +16,10 @@
   box-sizing: border-box;
 }
 
+[hidden] {
+  display: none !important;
+}
+
 html,
 body {
   height: 100%;
@@ -28,7 +32,7 @@ body {
 .app {
   height: 100%;
   display: grid;
-  grid-template-rows: auto auto 1fr;
+  grid-template-rows: auto auto auto 1fr;
 }
 
 .topbar {
@@ -46,6 +50,11 @@ body {
   gap: 6px;
   min-width: 240px;
   flex: 1;
+}
+
+.field.compact {
+  flex: 0 0 220px;
+  min-width: 200px;
 }
 
 label {
@@ -120,6 +129,68 @@ button.small {
   padding: 6px 10px;
   border-radius: 9px;
   font-size: 12px;
+}
+
+.row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.row input {
+  flex: 1;
+}
+
+.helper {
+  font-size: 12px;
+  color: rgba(76, 194, 255, 0.95);
+}
+
+.bannerArea {
+  padding: 10px 16px 0;
+}
+
+.banner {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.02);
+  margin-bottom: 10px;
+}
+
+.banner[data-kind="error"] {
+  border-color: rgba(255, 120, 120, 0.35);
+  background: rgba(255, 90, 90, 0.08);
+}
+
+.banner[data-kind="warn"] {
+  border-color: rgba(255, 210, 120, 0.35);
+  background: rgba(255, 210, 120, 0.08);
+}
+
+.bannerTitle {
+  font-size: 12px;
+  font-weight: 600;
+  margin: 0 0 4px;
+}
+
+.bannerMessage {
+  font-size: 12px;
+  color: var(--muted);
+  line-height: 1.35;
+  margin: 0;
+}
+
+.bannerActions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
 }
 
 .statusline {
@@ -314,6 +385,10 @@ button.small {
   box-shadow: var(--shadow);
 }
 
+.modal.modalSmall {
+  width: min(420px, calc(100vw - 40px));
+}
+
 .modalBody {
   padding: 14px;
 }
@@ -342,5 +417,9 @@ button.small {
   }
   .grid {
     grid-template-columns: 1fr;
+  }
+  .field.compact {
+    flex: 1;
+    min-width: 220px;
   }
 }

@@ -15,12 +15,24 @@
       <header class="topbar">
         <div class="field">
           <label for="urlInput">XHS Share URL</label>
-          <input id="urlInput" type="text" placeholder="Paste Xiaohongshu share URL…" />
+          <input id="urlInput" type="text" placeholder="Paste Xiaohongshu share URL" />
+          <div id="urlSanitizeHint" class="helper" hidden>Detected URL and cleaned pasted text.</div>
         </div>
+
+        <div class="field compact">
+          <label for="outputLanguageInput">Output Language</label>
+          <select id="outputLanguageInput">
+            <option value="zh-Hans">Chinese (Simplified)</option>
+            <option value="en">English</option>
+          </select>
+        </div>
+
         <button id="fetchBtn" class="primary">Fetch</button>
+        <button id="clearBtn" class="ghost">New / Clear</button>
         <button id="settingsBtn" class="ghost">Settings</button>
       </header>
 
+      <div id="bannerArea" class="bannerArea"></div>
       <div class="statusline" id="statusLine">Idle</div>
 
       <main class="main">
@@ -28,12 +40,12 @@
           <div class="paneHeader">
             <h2>Caption</h2>
           </div>
-          <textarea id="captionBox" class="caption" placeholder="Fetched caption will appear here… (you can edit before generating)"></textarea>
+          <textarea id="captionBox" class="caption" placeholder="Fetched caption will appear here (you can edit before generating)"></textarea>
 
           <div class="paneHeader">
             <h2>Images</h2>
             <div class="imgHeaderRight">
-              <div class="hint">Click to set first · × to remove</div>
+              <div class="hint">Click to set first; click × to remove</div>
               <div class="imgHeaderActions">
                 <button id="refreshImagesBtn" class="ghost small" type="button">Download</button>
                 <button id="resetEditsBtn" class="ghost small" type="button">Reset</button>
@@ -52,7 +64,7 @@
               <button id="exportBtn" class="ghost">Export .md</button>
             </div>
           </div>
-          <textarea id="outputBox" class="output" spellcheck="false" placeholder="Generated Markdown appears here…"></textarea>
+          <textarea id="outputBox" class="output" spellcheck="false" placeholder="Generated Markdown appears here"></textarea>
 
           <details class="logs" id="logsPanel">
             <summary>Logs</summary>
@@ -72,9 +84,7 @@
         <div class="grid">
           <div class="field">
             <label>OpenAI API Key</label>
-            <div class="hint">
-              Set <code>OPENAI_API_KEY</code> in <code>.env</code> (this app no longer stores keys in Settings).
-            </div>
+            <div class="hint">Set <code>OPENAI_API_KEY</code> in <code>.env</code> (this app no longer stores keys in Settings).</div>
           </div>
 
           <div class="field">
@@ -89,6 +99,15 @@
               <option value="stdio">Stdio (custom MCP)</option>
             </select>
             <div class="hint">For xpzouying/xiaohongshu-mcp use HTTP + http://localhost:18060/mcp</div>
+          </div>
+
+          <div class="field">
+            <label for="mcpExePathInput">MCP Executable Path</label>
+            <div class="row">
+              <input id="mcpExePathInput" type="text" placeholder="Select mcp.exe / xiaohongshu-mcp-windows-amd64.exe" />
+              <button id="browseMcpExeBtn" class="ghost" type="button">Browse…</button>
+            </div>
+            <div class="hint">Used for auto-start when Transport is HTTP.</div>
           </div>
 
           <div class="field">
@@ -119,6 +138,18 @@
       </form>
     </dialog>
 
+    <dialog id="confirmClearDialog" class="modal modalSmall">
+      <form method="dialog" class="modalBody">
+        <h2>Clear session?</h2>
+        <div class="hint">A request is still running. Clear anyway?</div>
+        <div class="modalActions">
+          <button value="cancel" class="ghost">Cancel</button>
+          <button id="confirmClearBtn" value="clear" class="primary">Clear</button>
+        </div>
+      </form>
+    </dialog>
+
     <script type="module" src="./renderer.js"></script>
   </body>
 </html>
+

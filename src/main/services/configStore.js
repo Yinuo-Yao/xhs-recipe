@@ -5,6 +5,7 @@ import { z } from "zod";
 const DEFAULT_OPENAI_MODEL = "gpt-4o-mini";
 const DEFAULT_MCP_HTTP_URL = "http://localhost:18060/mcp";
 const DEFAULT_MCP_TRANSPORT = "http";
+const DEFAULT_OUTPUT_LANGUAGE = "zh-Hans";
 
 const ConfigSchema = z.object({
   openai: z
@@ -15,10 +16,16 @@ const ConfigSchema = z.object({
   mcp: z
     .object({
       transport: z.enum(["stdio", "http"]).default(DEFAULT_MCP_TRANSPORT),
+      exePath: z.string().default(""),
       command: z.string().default(""),
       args: z.array(z.string()).default([]),
-      httpUrl: z.string().default(DEFAULT_MCP_HTTP_URL),
+      httpUrl: z.string().url().default(DEFAULT_MCP_HTTP_URL),
       toolName: z.string().default(""),
+    })
+    .default({}),
+  ui: z
+    .object({
+      outputLanguage: z.enum(["zh-Hans", "en"]).default(DEFAULT_OUTPUT_LANGUAGE),
     })
     .default({}),
   recentUrls: z.array(z.string()).default([]),
@@ -51,6 +58,16 @@ function parseArgsString(input) {
   if (quote) throw new Error("Unclosed quote in MCP Args");
   if (current) out.push(current);
   return out;
+}
+
+function tryValidateUrl(url) {
+  try {
+    // eslint-disable-next-line no-new
+    new URL(String(url));
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export function createConfigStore({ app }) {
@@ -111,7 +128,8 @@ export function createConfigStore({ app }) {
     }
     const envHttpUrl = process.env.XHS_MCP_URL || process.env.XHS_MCP_HTTP_URL;
     if (envHttpUrl && (!out.mcp.httpUrl || out.mcp.httpUrl === DEFAULT_MCP_HTTP_URL)) {
-      out.mcp.httpUrl = String(envHttpUrl);
+      const candidate = String(envHttpUrl).trim();
+      if (tryValidateUrl(candidate)) out.mcp.httpUrl = candidate;
     }
     if (!out.mcp.toolName && process.env.XHS_MCP_TOOL) out.mcp.toolName = process.env.XHS_MCP_TOOL;
 
@@ -132,11 +150,13 @@ export function createConfigStore({ app }) {
       openai: { model: cfg.openai.model, hasApiKey: Boolean(process.env.OPENAI_API_KEY) },
       mcp: {
         transport: cfg.mcp.transport,
+        exePath: cfg.mcp.exePath,
         command: cfg.mcp.command,
         args: cfg.mcp.args,
         httpUrl: cfg.mcp.httpUrl,
         toolName: cfg.mcp.toolName,
       },
+      ui: { outputLanguage: cfg.ui.outputLanguage },
       recentUrls: cfg.recentUrls,
     };
   }
@@ -144,10 +164,12 @@ export function createConfigStore({ app }) {
   async function applyPatch(patch) {
     const next = structuredClone(state.config);
     if (patch?.openai?.model != null) next.openai.model = String(patch.openai.model);
+    if (patch?.ui?.outputLanguage != null) next.ui.outputLanguage = patch.ui.outputLanguage === "en" ? "en" : "zh-Hans";
+    if (patch?.mcp?.exePath != null) next.mcp.exePath = String(patch.mcp.exePath).trim();
     if (patch?.mcp?.command != null) next.mcp.command = String(patch.mcp.command);
     if (patch?.mcp?.args != null) next.mcp.args = Array.isArray(patch.mcp.args) ? patch.mcp.args.map(String) : parseArgsString(patch.mcp.args);
     if (patch?.mcp?.transport != null) next.mcp.transport = patch.mcp.transport === "http" ? "http" : "stdio";
-    if (patch?.mcp?.httpUrl != null) next.mcp.httpUrl = String(patch.mcp.httpUrl);
+    if (patch?.mcp?.httpUrl != null) next.mcp.httpUrl = String(patch.mcp.httpUrl).trim();
     if (patch?.mcp?.toolName != null) next.mcp.toolName = String(patch.mcp.toolName);
     if (patch?.recentUrls != null) {
       next.recentUrls = Array.isArray(patch.recentUrls) ? patch.recentUrls.map(String) : next.recentUrls;

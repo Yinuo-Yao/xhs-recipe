@@ -2,14 +2,16 @@ import "dotenv/config";
 import { app, BrowserWindow, clipboard, dialog, nativeImage, shell, net } from "electron";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import { z } from "zod";
 
 import { createConfigStore } from "./services/configStore.js";
 import { createLogger } from "./services/logger.js";
+import { createMcpLauncher } from "./services/mcpLauncher.js";
 import { createXhsClient } from "./services/xhsClient.js";
 import { createOpenAIClient } from "./services/openaiClient.js";
-import { buildUserPrompt, SYSTEM_PROMPT } from "./services/prompt.js";
+import { buildSystemPrompt, buildUserPrompt } from "./services/prompt.js";
 import { normalizeMarkdownRecipe } from "./services/recipeFormatter.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -22,6 +24,15 @@ const IMAGE_JPEG_QUALITY = 82;
 const PREVIEW_MAX_DIM = 360;
 const PREVIEW_JPEG_QUALITY = 75;
 const PREVIEW_CACHE_MAX = 120;
+
+const ABORTED = Object.freeze({ __aborted: true });
+
+function toOutcome(promise) {
+  return Promise.resolve(promise).then(
+    (value) => ({ ok: true, value }),
+    (error) => ({ ok: false, error })
+  );
+}
 
 function createMainWindow() {
   const win = new BrowserWindow({
@@ -77,12 +88,13 @@ async function readResponseBodyWithLimit(res, maxBytes) {
   return Buffer.concat(chunks, total);
 }
 
-async function downloadImageViaNet(url, { logger, referer }) {
+async function downloadImageViaNet(url, { logger, referer, signal }) {
   const maxBytes = IMAGE_MAX_BYTES;
 
   async function doRequest(targetUrl, redirectsLeft) {
     return new Promise((resolve, reject) => {
       let timedOut = false;
+      let abortListener = null;
       const timeoutId = setTimeout(() => {
         timedOut = true;
         try {
@@ -90,8 +102,32 @@ async function downloadImageViaNet(url, { logger, referer }) {
         } catch {
           // ignore
         }
+        cleanup();
         reject(new Error(`image download failed (net): timeout after ${IMAGE_DOWNLOAD_TIMEOUT_MS}ms`));
       }, IMAGE_DOWNLOAD_TIMEOUT_MS);
+
+      function cleanup() {
+        clearTimeout(timeoutId);
+        if (signal && abortListener) signal.removeEventListener("abort", abortListener);
+      }
+
+      if (signal) {
+        if (signal.aborted) {
+          cleanup();
+          reject(new Error("Request aborted"));
+          return;
+        }
+        abortListener = () => {
+          try {
+            req.abort();
+          } catch {
+            // ignore
+          }
+          cleanup();
+          reject(new Error("Request aborted"));
+        };
+        signal.addEventListener("abort", abortListener, { once: true });
+      }
 
       const req = net.request({
         method: "GET",
@@ -111,7 +147,7 @@ async function downloadImageViaNet(url, { logger, referer }) {
         const status = res.statusCode ?? 0;
         const location = res.headers.location;
         if ([301, 302, 303, 307, 308].includes(status) && location && redirectsLeft > 0) {
-          clearTimeout(timeoutId);
+          cleanup();
           res.destroy();
           const nextUrl = new URL(location, targetUrl).toString();
           doRequest(nextUrl, redirectsLeft - 1).then(resolve, reject);
@@ -119,7 +155,7 @@ async function downloadImageViaNet(url, { logger, referer }) {
         }
 
         if (status < 200 || status >= 300) {
-          clearTimeout(timeoutId);
+          cleanup();
           res.destroy();
           reject(new Error(`image download failed (net): HTTP ${status}`));
           return;
@@ -128,7 +164,7 @@ async function downloadImageViaNet(url, { logger, referer }) {
         const contentType = String(res.headers["content-type"] ?? "application/octet-stream");
         const contentLength = res.headers["content-length"] ? Number(res.headers["content-length"]) : null;
         if (contentLength && Number.isFinite(contentLength) && contentLength > maxBytes) {
-          clearTimeout(timeoutId);
+          cleanup();
           res.destroy();
           reject(new Error(`image too large (${contentLength} bytes)`));
           return;
@@ -149,17 +185,17 @@ async function downloadImageViaNet(url, { logger, referer }) {
           chunks.push(buf);
         });
         res.on("end", () => {
-          clearTimeout(timeoutId);
+          cleanup();
           resolve({ buffer: Buffer.concat(chunks, total), contentType });
         });
         res.on("error", (err) => {
-          clearTimeout(timeoutId);
+          cleanup();
           reject(err);
         });
       });
 
       req.on("error", (err) => {
-        clearTimeout(timeoutId);
+        cleanup();
         reject(err);
       });
       req.end();
@@ -174,9 +210,22 @@ async function downloadImageViaNet(url, { logger, referer }) {
   }
 }
 
-async function downloadImage(url, logger, { referer } = {}) {
+function isAbortError(err) {
+  if (!err) return false;
+  const name = String(err?.name ?? "");
+  const msg = String(err?.message ?? err);
+  return name === "AbortError" || msg === "Request aborted" || msg.includes("aborted");
+}
+
+async function downloadImage(url, logger, { referer, signal } = {}) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), IMAGE_DOWNLOAD_TIMEOUT_MS);
+  let abortListener = null;
+  if (signal) {
+    if (signal.aborted) controller.abort();
+    abortListener = () => controller.abort();
+    signal.addEventListener("abort", abortListener, { once: true });
+  }
   try {
     const res = await fetch(url, {
       signal: controller.signal,
@@ -197,10 +246,12 @@ async function downloadImage(url, logger, { referer } = {}) {
     const buffer = await readResponseBodyWithLimit(res, IMAGE_MAX_BYTES);
     return { buffer, contentType };
   } catch (err) {
+    if (controller.signal.aborted || signal?.aborted || isAbortError(err)) throw err;
     logger.warn("image download failed", { url, err: String(err) });
-    return await downloadImageViaNet(url, { logger, referer });
+    return await downloadImageViaNet(url, { logger, referer, signal });
   } finally {
     clearTimeout(timeout);
+    if (signal && abortListener) signal.removeEventListener("abort", abortListener);
   }
 }
 
@@ -240,6 +291,7 @@ const XhsFetchSchema = z.object({
     .min(1)
     .max(5000)
     .refine((s) => /^https?:\/\//i.test(s), { message: "URL must start with http(s)://" }),
+  requestId: z.string().min(1).max(200).optional(),
 });
 
 const ImagePrimarySchema = z.discriminatedUnion("kind", [
@@ -251,7 +303,10 @@ const GenerateRecipeSchema = z.object({
   sourceUrl: z.string().min(1).max(5000),
   caption: z.string().max(200_000),
   images: z.array(ImagePrimarySchema).max(40).optional(),
+  requestId: z.string().min(1).max(200).optional(),
 });
+
+const AbortRequestSchema = z.object({ requestId: z.string().min(1).max(200) }).strict();
 
 const ConfigPatchSchema = z
   .object({
@@ -263,10 +318,16 @@ const ConfigPatchSchema = z
     mcp: z
       .object({
         transport: z.enum(["stdio", "http"]).optional(),
+        exePath: z.string().optional(),
         command: z.string().optional(),
         args: z.union([z.array(z.string()), z.string()]).optional(),
         httpUrl: z.string().url().optional(),
         toolName: z.string().optional(),
+      })
+      .optional(),
+    ui: z
+      .object({
+        outputLanguage: z.enum(["zh-Hans", "en"]).optional(),
       })
       .optional(),
     recentUrls: z.array(z.string()).optional(),
@@ -293,13 +354,79 @@ async function main() {
   const xhsClient = createXhsClient({ logger, configStore });
   const win = createMainWindow();
   const previewCache = new Map(); // key -> { ts, dataUrl }
+  const inFlightRequests = new Map(); // requestId -> { kind, controller }
+  const mcpLauncher = createMcpLauncher({
+    logger,
+    configStore,
+    emitStatus: (s) => {
+      try {
+        if (!win.isDestroyed()) win.webContents.send("mcp:status", s);
+      } catch {
+        // ignore
+      }
+    },
+  });
 
   const { ipcMain } = await import("electron");
+
+  ipcMain.handle("mcp:getStatus", async () => mcpLauncher.getStatus());
+
+  ipcMain.handle("dialog:pickMcpExecutable", async () => {
+    const res = await dialog.showOpenDialog(win, {
+      title: "Select MCP Executable",
+      properties: ["openFile"],
+      filters: [
+        { name: "Executable", extensions: ["exe"] },
+        { name: "All Files", extensions: ["*"] },
+      ],
+    });
+    if (res.canceled) return { canceled: true };
+    const filePath = Array.isArray(res.filePaths) && res.filePaths[0] ? res.filePaths[0] : null;
+    return { canceled: false, filePath };
+  });
+
+  ipcMain.handle("request:abort", async (_e, payload) => {
+    const parsed = AbortRequestSchema.parse(payload);
+    const entry = inFlightRequests.get(parsed.requestId);
+    if (!entry) return { ok: false, notFound: true };
+    try {
+      entry.controller.abort();
+    } catch {
+      // ignore
+    }
+    if (entry.kind === "fetch") {
+      await xhsClient.disconnect?.().catch(() => {});
+    }
+    return { ok: true };
+  });
+
+  ipcMain.handle("request:abortAll", async () => {
+    const ids = Array.from(inFlightRequests.keys());
+    for (const id of ids) {
+      const entry = inFlightRequests.get(id);
+      if (!entry) continue;
+      try {
+        entry.controller.abort();
+      } catch {
+        // ignore
+      }
+    }
+    await xhsClient.disconnect?.().catch(() => {});
+    return { ok: true, aborted: ids.length };
+  });
+
+  ipcMain.handle("session:clear", async () => {
+    await xhsClient.resetSession?.().catch(() => {});
+    return { ok: true };
+  });
+
+  void mcpLauncher.ensureStarted({ reason: "startup" });
 
   ipcMain.handle("config:get", async () => configStore.getPublicConfig());
   ipcMain.handle("config:save", async (_e, patch) => {
     const parsed = ConfigPatchSchema.parse(patch);
     await configStore.applyPatch(parsed);
+    void mcpLauncher.ensureStarted({ reason: "config_save" });
     return configStore.getPublicConfig();
   });
 
@@ -310,12 +437,32 @@ async function main() {
     return { folder };
   });
 
-  ipcMain.handle("xhs:fetchPost", async (_e, { url }) => {
-    const parsed = XhsFetchSchema.parse({ url });
+  ipcMain.handle("xhs:fetchPost", async (_e, payload) => {
+    const parsed = XhsFetchSchema.parse(payload);
     logger.info("fetch start", { url: parsed.url });
-    const post = await xhsClient.getPost(parsed.url);
-    logger.info("fetch done", { url: parsed.url, images: post.images.length, captionLen: post.caption.length });
-    return post;
+
+    const requestId = parsed.requestId || crypto.randomUUID();
+    const controller = new AbortController();
+    inFlightRequests.set(requestId, { kind: "fetch", controller });
+
+    try {
+      const abortPromise = new Promise((resolve) => {
+        if (controller.signal.aborted) return resolve(ABORTED);
+        controller.signal.addEventListener("abort", () => resolve(ABORTED), { once: true });
+      });
+
+      const winner = await Promise.race([toOutcome(xhsClient.getPost(parsed.url)), toOutcome(abortPromise)]);
+      if (winner.ok && winner.value?.__aborted) {
+        await xhsClient.disconnect?.().catch(() => {});
+        throw new Error("Request aborted");
+      }
+      if (!winner.ok) throw winner.error;
+      const post = winner.value;
+      logger.info("fetch done", { url: parsed.url, images: post.images.length, captionLen: post.caption.length });
+      return post;
+    } finally {
+      inFlightRequests.delete(requestId);
+    }
   });
 
   ipcMain.handle("images:previews", async (_e, { images }) => {
@@ -326,6 +473,7 @@ async function main() {
       previewCache.set(key, { ts: Date.now(), dataUrl });
       while (previewCache.size > PREVIEW_CACHE_MAX) {
         const oldestKey = previewCache.keys().next().value;
+        if (oldestKey === undefined) break;
         previewCache.delete(oldestKey);
       }
     }
@@ -377,49 +525,99 @@ async function main() {
     return { previews: out };
   });
 
-  ipcMain.handle("openai:generateRecipe", async (_e, { sourceUrl, caption, images }) => {
-    const parsed = GenerateRecipeSchema.parse({ sourceUrl, caption, images: Array.isArray(images) ? images : [] });
+  ipcMain.handle("openai:generateRecipe", async (_e, payload) => {
+    const parsed = GenerateRecipeSchema.parse({
+      ...(payload ?? {}),
+      images: Array.isArray(payload?.images) ? payload.images : [],
+    });
     const cfg = await configStore.getResolvedConfig();
     const apiKey = await configStore.getOpenAIApiKey();
     if (!apiKey) throw new Error("Missing OpenAI API key. Set OPENAI_API_KEY in .env.");
 
-    const requested = parsed.images ?? [];
-    const imageDataUrls = [];
-    const failures = [];
-    for (const img of requested) {
-      if (img.kind === "dataUrl" && img.dataUrl) {
-        imageDataUrls.push(img.dataUrl);
-        continue;
-      }
-      if (img.kind === "url" && img.url) {
-        const downloaded = await downloadImage(img.url, logger, { referer: parsed.sourceUrl });
-        if (!downloaded) {
-          failures.push({ kind: "url", url: img.url, reason: "download_failed" });
-          continue;
-        }
-        const processed = preprocessImageForOpenAI(downloaded, logger);
-        if (!processed) {
-          failures.push({ kind: "url", url: img.url, reason: "preprocess_failed" });
-          continue;
-        }
-        imageDataUrls.push(processed);
-      }
-    }
+    const requestId = parsed.requestId || crypto.randomUUID();
+    const controller = new AbortController();
+    inFlightRequests.set(requestId, { kind: "generate", controller });
 
-    logger.info("openai generate start", { model: cfg.openai.model, images: imageDataUrls.length });
-    const openaiClient = createOpenAIClient({ logger, apiKey, model: cfg.openai.model });
-    const userPrompt = buildUserPrompt({ sourceUrl: parsed.sourceUrl, caption: parsed.caption });
-    const markdown = await openaiClient.generateRecipeMarkdown({
-      systemPrompt: SYSTEM_PROMPT,
-      userPrompt,
-      imageDataUrls,
-    });
-    const normalized = normalizeMarkdownRecipe(markdown);
-    logger.info("openai generate done", { chars: normalized.length });
-    return {
-      markdown: normalized,
-      meta: { images: { requested: requested.length, attached: imageDataUrls.length, failures } },
-    };
+    try {
+      const abortPromise = new Promise((resolve) => {
+        if (controller.signal.aborted) return resolve(ABORTED);
+        controller.signal.addEventListener("abort", () => resolve(ABORTED), { once: true });
+      });
+      const abortOutcome = toOutcome(abortPromise);
+
+      const requested = parsed.images ?? [];
+      const imageDataUrls = [];
+      const failures = [];
+      for (const img of requested) {
+        if (controller.signal.aborted) throw new Error("Request aborted");
+        if (img.kind === "dataUrl" && img.dataUrl) {
+          imageDataUrls.push(img.dataUrl);
+          continue;
+        }
+        if (img.kind === "url" && img.url) {
+          const downloadWinner = await Promise.race([
+            toOutcome(downloadImage(img.url, logger, { referer: parsed.sourceUrl, signal: controller.signal })),
+            abortOutcome,
+          ]);
+          if (downloadWinner.ok && downloadWinner.value?.__aborted) throw new Error("Request aborted");
+          if (!downloadWinner.ok) throw downloadWinner.error;
+          const downloaded = downloadWinner.value;
+          if (!downloaded) {
+            failures.push({ kind: "url", url: img.url, reason: "download_failed" });
+            continue;
+          }
+          const processed = preprocessImageForOpenAI(downloaded, logger);
+          if (!processed) {
+            failures.push({ kind: "url", url: img.url, reason: "preprocess_failed" });
+            continue;
+          }
+          imageDataUrls.push(processed);
+        }
+      }
+
+      logger.info("openai generate start", { model: cfg.openai.model, images: imageDataUrls.length });
+      const openaiClient = createOpenAIClient({ logger, apiKey, model: cfg.openai.model });
+      const systemPrompt = buildSystemPrompt({ outputLanguage: cfg.ui?.outputLanguage });
+      const userPrompt = buildUserPrompt({ sourceUrl: parsed.sourceUrl, caption: parsed.caption });
+      async function runModel(modelName) {
+        const client = modelName === cfg.openai.model ? openaiClient : createOpenAIClient({ logger, apiKey, model: modelName });
+        const winner = await Promise.race([
+          toOutcome(
+            client.generateRecipeMarkdown({
+              systemPrompt,
+              userPrompt,
+              imageDataUrls,
+              signal: controller.signal,
+            })
+          ),
+          abortOutcome,
+        ]);
+        if (winner.ok && winner.value?.__aborted) throw new Error("Request aborted");
+        if (!winner.ok) throw winner.error;
+        return winner.value;
+      }
+
+      let markdown;
+      try {
+        markdown = await runModel(cfg.openai.model);
+      } catch (err) {
+        const msg = String(err?.message ?? err);
+        const isBlank = msg.includes("blank content") || msg.includes("no content") || msg.includes("incomplete (max_output_tokens)");
+        if (!isBlank || !/^gpt-5/i.test(cfg.openai.model)) throw err;
+        const fallbackModel = "gpt-4o-mini";
+        logger.warn("openai primary model returned empty; retrying with fallback model", { primary: cfg.openai.model, fallback: fallbackModel });
+        markdown = await runModel(fallbackModel);
+      }
+
+      const normalized = normalizeMarkdownRecipe(markdown);
+      logger.info("openai generate done", { chars: normalized.length });
+      return {
+        markdown: normalized,
+        meta: { images: { requested: requested.length, attached: imageDataUrls.length, failures } },
+      };
+    } finally {
+      inFlightRequests.delete(requestId);
+    }
   });
 
   ipcMain.handle("output:copy", async (_e, { text }) => {
@@ -446,7 +644,7 @@ async function main() {
     if (quitting) return;
     quitting = true;
     e.preventDefault();
-    Promise.allSettled([xhsClient.shutdown?.(), logger.flush?.()]).finally(() => app.quit());
+    Promise.allSettled([xhsClient.shutdown?.(), mcpLauncher.shutdown?.(), logger.flush?.()]).finally(() => app.quit());
   });
 
   app.on("window-all-closed", () => {

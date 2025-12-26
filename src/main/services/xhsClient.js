@@ -107,6 +107,18 @@ function extractTextFromToolResult(toolResult) {
     .trim();
 }
 
+function looksLikeNotFoundError(message) {
+  const msg = String(message ?? "").toLowerCase();
+  if (!msg) return false;
+  return (
+    msg.includes("not found") ||
+    msg.includes("notedetailmap") ||
+    msg.includes("404") ||
+    msg.includes("resource not found") ||
+    msg.includes("不存在")
+  );
+}
+
 function tryParseJson(text) {
   const trimmed = String(text ?? "").trim();
   if (!trimmed) return null;
@@ -133,10 +145,8 @@ function normalizeImages(images) {
 
     const url = item.url || item.src || item.urlDefault || item.urlPre || item.previewUrl || item.preview || item.link;
     if (typeof url === "string" && /^https?:\/\//i.test(url)) {
-      const normalizedUrl = url.startsWith("http://") ? `https://${url.slice("http://".length)}` : url;
       const previewUrl = item.urlPre && /^https?:\/\//i.test(item.urlPre) ? item.urlPre : url;
-      const normalizedPreviewUrl = previewUrl.startsWith("http://") ? `https://${previewUrl.slice("http://".length)}` : previewUrl;
-      out.push({ id: `img_${i + 1}`, source: { kind: "url", url: normalizedUrl }, previewUrl: normalizedPreviewUrl });
+      out.push({ id: `img_${i + 1}`, source: { kind: "url", url }, previewUrl });
       continue;
     }
 
@@ -202,6 +212,15 @@ async function detectToolName(client) {
   throw new Error(`Could not auto-detect a \"get content\" tool. Available tools: ${names.join(", ") || "(none)"}`);
 }
 
+async function detectUrlToolFallbackName(client) {
+  const tools = await withTimeout(client.listTools(), MCP_TOOL_TIMEOUT_MS, "MCP listTools");
+  const names = (tools?.tools ?? []).map((t) => t.name).filter(Boolean);
+  const preferred = ["getContent", "get_content", "get-content", "get_post", "getPost", "get_note", "getNote"];
+  for (const name of preferred) if (names.includes(name)) return name;
+  const heuristic = names.find((n) => n !== "get_feed_detail" && /get/i.test(n) && /(content|post|note|xhs)/i.test(n));
+  return heuristic || null;
+}
+
 export function createXhsClient({ logger, configStore }) {
   let connected = null; // { client, transport }
   let connecting = null;
@@ -217,6 +236,7 @@ export function createXhsClient({ logger, configStore }) {
     }
     while (cache.size > CACHE_MAX_ENTRIES) {
       const oldestKey = cache.keys().next().value;
+      if (oldestKey === undefined) break;
       cache.delete(oldestKey);
     }
   }
@@ -296,6 +316,7 @@ export function createXhsClient({ logger, configStore }) {
     const cached = cache.get(sourceUrl);
     if (cached && Date.now() - cached.ts < CACHE_TTL_MS) return cached.post;
 
+    const finalUrl = await resolveFinalUrl(sourceUrl, logger);
     const client = await getClient();
     const cfg = await configStore.getResolvedConfig();
     const toolName = cfg.mcp.toolName ? String(cfg.mcp.toolName) : detectedToolName || (await detectToolName(client));
@@ -303,7 +324,6 @@ export function createXhsClient({ logger, configStore }) {
 
     let feedArgs = null;
     if (toolName === "get_feed_detail") {
-      const finalUrl = await resolveFinalUrl(sourceUrl, logger);
       feedArgs = extractFeedIdAndToken(finalUrl);
       if (!feedArgs) {
         throw new Error(
@@ -324,7 +344,7 @@ export function createXhsClient({ logger, configStore }) {
           "MCP callTool(get_feed_detail)"
         );
       } else {
-        toolResult = await callToolWithFallbackArgs(client, toolName, sourceUrl);
+        toolResult = await callToolWithFallbackArgs(client, toolName, finalUrl);
       }
     } catch (err) {
       logger.error("mcp tool call failed", { toolName, err: String(err) });
@@ -343,7 +363,7 @@ export function createXhsClient({ logger, configStore }) {
             "MCP callTool(get_feed_detail)"
           );
         } else {
-          toolResult = await callToolWithFallbackArgs(retryClient, toolName, sourceUrl);
+          toolResult = await callToolWithFallbackArgs(retryClient, toolName, finalUrl);
         }
       } catch (err2) {
         throw new Error(`Fetch failed: MCP tool \"${toolName}\" error: ${String(err2?.message ?? err2)}`);
@@ -352,13 +372,45 @@ export function createXhsClient({ logger, configStore }) {
 
     if (toolResult?.isError) {
       const msg = extractTextFromToolResult(toolResult) || "MCP tool returned an error";
-      throw new Error(msg);
+      if (toolName !== "get_feed_detail" && finalUrl !== sourceUrl && looksLikeNotFoundError(msg)) {
+        try {
+          logger.warn("mcp url-based tool failed with resolved URL; retrying with original URL", { toolName });
+          const retryResult = await callToolWithFallbackArgs(await getClient(), toolName, sourceUrl);
+          if (retryResult && !retryResult.isError) toolResult = retryResult;
+        } catch (retryErr) {
+          logger.warn("mcp retry with original URL failed", { err: String(retryErr) });
+        }
+      }
+      if (!cfg.mcp.toolName && toolName === "get_feed_detail" && looksLikeNotFoundError(msg)) {
+        try {
+          const fallbackClient = await getClient();
+          const alt = await detectUrlToolFallbackName(fallbackClient);
+          if (alt) {
+            logger.warn("mcp get_feed_detail failed; trying url-based tool fallback", { toolName, alt });
+            const altResult = await callToolWithFallbackArgs(fallbackClient, alt, finalUrl);
+            if (altResult && !altResult.isError) {
+              detectedToolName = alt;
+              toolResult = altResult;
+            }
+          }
+        } catch (fallbackErr) {
+          logger.warn("mcp fallback tool also failed", { err: String(fallbackErr) });
+        }
+      }
+
+      if (toolResult?.isError) {
+        const hint =
+          "Fetch failed. The post may be deleted/private, or the URL token is missing/expired.\n" +
+          "- Try opening the post in a browser and copying the full URL (with xsec_token).\n" +
+          "- If you used an xhslink short link, try pasting the expanded www.xiaohongshu.com URL.";
+        throw new Error(`${msg}\n\n${hint}`);
+      }
     }
 
     const text = extractTextFromToolResult(toolResult);
     const parsed = tryParseJson(text);
     const raw = parsed ?? (text ? { caption: text } : toolResult);
-    const post = normalizePost({ sourceUrl, raw });
+    const post = normalizePost({ sourceUrl: finalUrl, raw });
 
     if (!post.caption && post.images.length === 0) {
       logger.warn("mcp returned empty post", { toolName, toolResult: safeToString(toolResult) });
@@ -373,5 +425,11 @@ export function createXhsClient({ logger, configStore }) {
     getPost,
     disconnect: () => disconnect("manual"),
     shutdown: () => disconnect("shutdown"),
+    resetSession: () => {
+      cache.clear();
+      detectedToolName = null;
+      opCounter = 0;
+      return disconnect("session reset");
+    },
   };
 }
